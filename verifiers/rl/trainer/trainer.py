@@ -531,20 +531,44 @@ class RLTrainer(Trainer):
             if is_peft_model(self.model):
                 # PEFT: gather + merge, then update each parameter
                 with gather_if_zero3(list(self.model.parameters())):
-                    self.model.merge_adapter()  # type: ignore :(
-                    for name, param in self.model.named_parameters():
-                        # recover original parameter names
-                        name = name.removeprefix("base_model.model.").replace(
-                            ".base_layer", ""
-                        )
-                        if self.model.prefix in name:  # type: ignore :(
-                            continue  # discard some parameters
-                        if "original_module" in name:  # from modules_to_save
-                            continue
-                        name = name.replace("modules_to_save.default.", "")
-                        if self.client:
-                            self.client.update_named_param(name, param.data)
-                    self.model.unmerge_adapter()  # type: ignore :(
+                    if self.lora_ids and len(self.lora_ids) > 1:
+                        # Multi-LoRA: sync each adapter separately
+                        # For each adapter, we merge just that one, sync, then unmerge
+                        self.logger.debug(f"Syncing {len(self.lora_ids)} LoRA adapters")
+                        for lora_id in self.lora_ids:
+                            adapter_name = f"lora_{lora_id}"
+                            self.model.set_adapter(adapter_name)
+                            self.model.merge_adapter()
+                            for name, param in self.model.named_parameters():
+                                name = name.removeprefix("base_model.model.").replace(
+                                    ".base_layer", ""
+                                )
+                                if self.model.prefix in name:
+                                    continue
+                                if "original_module" in name:
+                                    continue
+                                name = name.replace("modules_to_save.default.", "")
+                                if self.client:
+                                    self.client.update_named_param(name, param.data)
+                            self.model.unmerge_adapter()
+                        # Note: This syncs each adapter's merged view sequentially.
+                        # For true multi-LoRA vLLM serving, vLLM needs to support
+                        # loading multiple adapters and routing requests.
+                    else:
+                        # Single LoRA: existing merge/sync/unmerge
+                        self.model.merge_adapter()
+                        for name, param in self.model.named_parameters():
+                            name = name.removeprefix("base_model.model.").replace(
+                                ".base_layer", ""
+                            )
+                            if self.model.prefix in name:
+                                continue
+                            if "original_module" in name:
+                                continue
+                            name = name.replace("modules_to_save.default.", "")
+                            if self.client:
+                                self.client.update_named_param(name, param.data)
+                        self.model.unmerge_adapter()
             else:
                 # non-PEFT models: gather + update each parameter individually
                 for name, param in self.model.named_parameters():  # type: ignore :(
