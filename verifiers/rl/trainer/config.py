@@ -54,15 +54,6 @@ class RLConfig(TrainingArguments):
         metadata={"help": "LoRA configuration."},
     )
 
-    # Multi-LoRA settings (for multi-agent training)
-    multi_lora: bool = field(
-        default=True,
-        metadata={
-            "help": "Whether to use multiple LoRA adapters for multi-agent environments. "
-            "When enabled with a MultiAgentEnv, each lora_id group gets its own adapter."
-        },
-    )
-
     # batch arguments
     rollouts_per_example: int = field(
         default=16,

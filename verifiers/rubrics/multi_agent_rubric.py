@@ -189,9 +189,9 @@ class MultiAgentRubric(Rubric):
             agent_view = self._create_agent_view(state, agent_id)
             await rubric.score_rollout(agent_view)
 
-            # Extract results from scored view
-            agent_reward = agent_view["reward"]
-            agent_metrics = agent_view["metrics"]
+            # Extract results
+            agent_reward = agent_view.get("reward", 0.0) or 0.0
+            agent_metrics = agent_view.get("metrics", {}) or {}
 
             # Store in agent state
             agent_state["reward"] = agent_reward
@@ -234,7 +234,7 @@ class MultiAgentRubric(Rubric):
             await self.score_rollout(state)
 
         # Compute advantages relative to group mean
-        rewards = [state["reward"] for state in states]
+        rewards = [state.get("reward", 0.0) or 0.0 for state in states]
         avg_reward = sum(rewards) / len(rewards) if rewards else 0.0
 
         for state, reward in zip(states, rewards):
@@ -243,5 +243,6 @@ class MultiAgentRubric(Rubric):
             # Also set per-agent advantages if multi-agent
             if "agents" in state:
                 for agent_id, agent_state in state["agents"].items():
-                    # Per-agent advantage relative to group mean
-                    agent_state["advantage"] = agent_state["reward"] - avg_reward
+                    agent_reward = agent_state.get("reward", 0.0) or 0.0
+                    # Per-agent advantage relative to that agent's mean across group
+                    agent_state["advantage"] = agent_reward - avg_reward
