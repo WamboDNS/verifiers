@@ -290,7 +290,8 @@ class MultiAgentEnv(vf.MultiTurnEnv):
         Get model response for an agent.
 
         Uses agent's client/model/sampling_args if set, otherwise falls back
-        to state defaults.
+        to state defaults. If the agent has a lora_id, includes it in the
+        request for vLLM multi-LoRA routing.
         """
         prompt = agent.get_prompt()
 
@@ -298,6 +299,15 @@ class MultiAgentEnv(vf.MultiTurnEnv):
         client = agent.client or state["client"]
         model = agent.model or state["model"]
         sampling_args = {**state.get("sampling_args", {}), **agent.sampling_args}
+
+        # Add LoRA request for multi-LoRA vLLM serving
+        if agent.lora_id is not None:
+            extra_body = sampling_args.get("extra_body", {})
+            extra_body["lora_request"] = {
+                "lora_name": f"lora_{agent.lora_id}",
+                "lora_int_id": agent.lora_id,
+            }
+            sampling_args["extra_body"] = extra_body
 
         response = await self.get_model_response(
             state=state,
