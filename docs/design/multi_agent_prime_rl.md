@@ -419,21 +419,37 @@ client.update_lora_adapter(lora_id: int, weights: dict[str, Tensor])
 extra_body={"lora_request": {"lora_name": f"lora_{lora_id}", "lora_int_id": lora_id}}
 ```
 
-## Implementation Order
+## Implementation Status
 
-### Phase 1: Training Pipeline
-1. **Orchestrator**: Add `lora_ids` to Microbatch, multi-agent batch processing
-2. **Trainer**: Multi-LoRA setup, adapter switching in training loop
-3. **Test**: Verify adapters receive correct gradients (can test without vLLM changes)
+### Completed
 
-### Phase 2: Inference Pipeline
-4. **vLLM server**: Multi-adapter loading and request routing
-5. **VLLMClient**: `update_lora_adapter()` method
-6. **Environment**: Pass `lora_id` in inference requests
+**verifiers (environment layer):**
+- `MultiAgentEnv`: Multi-agent rollouts with per-agent trajectory collection
+- `Agent`/`AgentConfig`: Agent abstraction with `lora_id` and `trainable` fields
+- `TraceCollector`: Per-agent trajectory collection with `extract_rollouts()`
+- Inference routing: `lora_request` in extra_body for vLLM multi-LoRA serving
 
-### Phase 3: Sync Pipeline
-7. **Trainer**: Per-adapter weight sync (instead of merge)
-8. **End-to-end test**: Full training loop with independent adapters
+**prime-rl (training layer):**
+- `TrainingSample.lora_id`: Per-sample LoRA assignment
+- `process_multi_agent_rollout()`: Extracts agent rollouts with lora_id tagging
+- `SinglePacker`: Routes multi-agent samples to correct LoRA adapters
+- Validation: Fails fast if lora_id exceeds configured max_runs
+
+### Configuration Requirement
+
+For multi-agent training, set `max_runs` in trainer config to be >= max(lora_id) + 1:
+
+```toml
+# Example: 2 agents with lora_id 0 and 1
+[trainer]
+max_runs = 2
+```
+
+### Remaining Work
+
+1. **vLLM multi-adapter serving**: Load and serve multiple LoRA adapters
+2. **Per-adapter weight sync**: Sync each adapter separately to vLLM
+3. **Per-agent metrics**: Track and log rewards per agent_id
 
 ## Metrics & Logging
 
