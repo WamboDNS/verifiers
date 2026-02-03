@@ -20,13 +20,18 @@ from .envs.multiturn_env import MultiTurnEnv  # noqa # isort: skip
 from .envs.tool_env import ToolEnv  # noqa # isort: skip
 
 # main imports
+from .agents.agent import Agent, AgentConfig
+from .agents.context import ContextStrategy, FullDialogContext, SlidingWindowContext
+from .collectors.trace_collector import TraceCollector
 from .envs.env_group import EnvGroup
+from .envs.multi_agent_env import MultiAgentEnv
 from .envs.singleturn_env import SingleTurnEnv
 from .envs.stateful_tool_env import StatefulToolEnv
 from .parsers.maybe_think_parser import MaybeThinkParser
 from .parsers.think_parser import ThinkParser
 from .parsers.xml_parser import XMLParser
 from .rubrics.judge_rubric import JudgeRubric
+from .rubrics.multi_agent_rubric import MultiAgentRubric
 from .rubrics.rubric_group import RubricGroup
 from .utils.data_utils import (
     extract_boxed_answer,
@@ -46,15 +51,38 @@ from .utils.logging_utils import (
 setup_logging(os.getenv("VF_LOG_LEVEL", "INFO"))
 
 __all__ = [
+    # Types
     "DatasetBuilder",
+    # Parsers
     "Parser",
     "ThinkParser",
     "MaybeThinkParser",
     "XMLParser",
+    # Rubrics
     "Rubric",
     "JudgeRubric",
     "RubricGroup",
     "MathRubric",
+    "MultiAgentRubric",
+    # Agents
+    "Agent",
+    "AgentConfig",
+    "ContextStrategy",
+    "FullDialogContext",
+    "SlidingWindowContext",
+    # Collectors
+    "TraceCollector",
+    # Environments
+    "Environment",
+    "MultiTurnEnv",
+    "MultiAgentEnv",
+    "SingleTurnEnv",
+    "PythonEnv",
+    "SandboxEnv",
+    "StatefulToolEnv",
+    "ToolEnv",
+    "EnvGroup",
+    # Integrations (lazy)
     "TextArenaEnv",
     "ReasoningGymEnv",
     "GymEnv",
@@ -62,14 +90,7 @@ __all__ = [
     "HarborEnv",
     "MCPEnv",
     "BrowserEnv",
-    "Environment",
-    "MultiTurnEnv",
-    "SingleTurnEnv",
-    "PythonEnv",
-    "SandboxEnv",
-    "StatefulToolEnv",
-    "ToolEnv",
-    "EnvGroup",
+    # Utils
     "extract_boxed_answer",
     "extract_hash_answer",
     "load_example_dataset",
@@ -78,6 +99,7 @@ __all__ = [
     "quiet_verifiers",
     "load_environment",
     "print_prompt_completions_sample",
+    # RL (lazy)
     "get_model",
     "get_model_and_tokenizer",
     "RLTrainer",
@@ -86,9 +108,11 @@ __all__ = [
     "GRPOConfig",
     "grpo_defaults",
     "lora_defaults",
+    # Decorators
     "cleanup",
     "stop",
     "teardown",
+    # Config
     "ensure_keys",
     "MissingKeyError",
 ]
@@ -151,3 +175,13 @@ if TYPE_CHECKING:
         get_model_and_tokenizer,
     )
     from .rubrics.math_rubric import MathRubric  # noqa: F401
+
+    # Re-export for type checking (already imported above, but explicit for clarity)
+    from .agents.agent import Agent as Agent  # noqa: F401
+    from .agents.agent import AgentConfig as AgentConfig  # noqa: F401
+    from .agents.context import ContextStrategy as ContextStrategy  # noqa: F401
+    from .agents.context import FullDialogContext as FullDialogContext  # noqa: F401
+    from .agents.context import SlidingWindowContext as SlidingWindowContext  # noqa: F401
+    from .collectors.trace_collector import TraceCollector as TraceCollector  # noqa: F401
+    from .envs.multi_agent_env import MultiAgentEnv as MultiAgentEnv  # noqa: F401
+    from .rubrics.multi_agent_rubric import MultiAgentRubric as MultiAgentRubric  # noqa: F401
