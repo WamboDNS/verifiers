@@ -55,6 +55,24 @@ class RLTrainer(Trainer):
             "https://github.com/PrimeIntellect-ai/prime-rl"
         )
 
+        # Detect multi-agent environment
+        self.is_multi_agent = hasattr(env, "get_lora_groups")
+        self.lora_groups: Dict[int | None, List[str]] = {}
+        self.lora_ids: List[int] = []
+        self.has_base_model_agents = False
+
+        if self.is_multi_agent:
+            self.lora_groups = env.get_lora_groups()
+            self.lora_ids = sorted([lid for lid in self.lora_groups.keys() if lid is not None])
+            self.has_base_model_agents = None in self.lora_groups
+            self.logger.info(
+                f"Multi-agent environment: {len(self.lora_ids)} LoRA adapters, "
+                f"base_model_agents={self.has_base_model_agents}"
+            )
+            for lora_id, agents in self.lora_groups.items():
+                lora_name = f"lora_{lora_id}" if lora_id is not None else "base"
+                self.logger.info(f"  {lora_name}: {agents}")
+
         # model + tokenizer
         if isinstance(model, str):
             model_name = model
@@ -64,8 +82,13 @@ class RLTrainer(Trainer):
         else:
             model_name = model.config._name_or_path
         assert isinstance(model, PreTrainedModel)
+
+        # Setup LoRA - single or multi
         if args.use_lora and isinstance(args.lora_config, PeftConfig):
-            model = prepare_peft_model(model, args.lora_config, args)
+            if self.lora_ids and args.multi_lora:
+                model = self._setup_multi_lora(model, args)
+            else:
+                model = prepare_peft_model(model, args.lora_config, args)
         model.warnings_issued["estimate_tokens"] = True  # suppress warning
 
         super().__init__(
@@ -137,6 +160,115 @@ class RLTrainer(Trainer):
             "rewards": defaultdict(lambda: deque()),
         }
 
+    def _setup_multi_lora(
+        self, model: PreTrainedModel, args: RLConfig
+    ) -> PreTrainedModel:
+        """Setup multiple independent LoRA adapters for multi-agent training."""
+        assert args.lora_config is not None
+
+        # Create first adapter
+        first_lora_id = self.lora_ids[0]
+        adapter_name = f"lora_{first_lora_id}"
+        model = prepare_peft_model(model, args.lora_config, args)
+
+        # Rename default adapter to lora_{first_id}
+        if hasattr(model, "peft_config"):
+            model.peft_config[adapter_name] = model.peft_config.pop("default")
+            for name, module in model.named_modules():
+                if hasattr(module, "lora_A") and "default" in module.lora_A:
+                    module.lora_A[adapter_name] = module.lora_A.pop("default")
+                    module.lora_B[adapter_name] = module.lora_B.pop("default")
+
+        # Create additional adapters
+        for lora_id in self.lora_ids[1:]:
+            adapter_name = f"lora_{lora_id}"
+            model.add_adapter(adapter_name, args.lora_config)
+            self.logger.info(f"Created LoRA adapter: {adapter_name}")
+
+        # Set first adapter as active
+        model.set_adapter(f"lora_{self.lora_ids[0]}")
+        self.logger.info(f"Initialized {len(self.lora_ids)} LoRA adapters")
+
+        return model
+
+    def _group_microbatch_by_lora(
+        self, microbatch: Any
+    ) -> Dict[int | None, Dict[str, List[Any]]]:
+        """Group microbatch samples by their lora_id."""
+        groups: Dict[int | None, Dict[str, List[Any]]] = defaultdict(
+            lambda: {
+                "input_ids": [],
+                "loss_mask": [],
+                "sampling_logprobs": [],
+                "advantages": [],
+            }
+        )
+
+        for i, lora_id in enumerate(microbatch.lora_ids):
+            groups[lora_id]["input_ids"].append(microbatch.input_ids[i])
+            groups[lora_id]["loss_mask"].append(microbatch.loss_mask[i])
+            groups[lora_id]["sampling_logprobs"].append(microbatch.sampling_logprobs[i])
+            groups[lora_id]["advantages"].append(microbatch.advantages[i])
+
+        return dict(groups)
+
+    def _forward_backward_group(
+        self,
+        model: nn.Module,
+        group_data: Dict[str, List[Any]],
+        device: torch.device,
+        pad_token_id: int,
+        inv_tokens_per_rank: torch.Tensor,
+    ) -> tuple[torch.Tensor, Dict[str, Dict[str, torch.Tensor]]]:
+        """Forward and backward pass for a group of samples (same lora_id)."""
+        input_ids = pad(
+            [torch.tensor(x, device=device) for x in group_data["input_ids"]],
+            padding_value=pad_token_id,
+            padding_side="right",
+        )
+        loss_mask = pad(
+            [torch.tensor(x, device=device) for x in group_data["loss_mask"]],
+            padding_side="right",
+        )
+        inference_logprobs = pad(
+            [torch.tensor(x, device=device) for x in group_data["sampling_logprobs"]],
+            padding_value=0,
+            padding_side="right",
+        )
+        advantages = pad(
+            [torch.tensor(x, device=device) for x in group_data["advantages"]],
+            padding_value=0,
+            padding_side="right",
+        )
+
+        attn_mask = input_ids.ne(pad_token_id).int()
+        trainer_logprobs, entropies = self.get_logprobs(model, input_ids, attn_mask)
+
+        loss_mask = loss_mask[:, 1:]
+        inference_logprobs = inference_logprobs[:, 1:]
+        advantages = advantages[:, 1:]
+
+        mb_inputs = {
+            "loss_mask": loss_mask,
+            "inference_logprobs": inference_logprobs,
+            "trainer_logprobs": trainer_logprobs,
+            "entropies": entropies,
+            "advantages": advantages,
+        }
+
+        with self.compute_loss_context_manager():
+            loss, summaries = self.compute_loss(
+                model,
+                mb_inputs,
+                num_items_in_batch=torch.tensor(self.batch_size, device=device),
+                return_outputs=True,
+            )
+
+        self.accelerator.backward(loss * inv_tokens_per_rank)
+        assert isinstance(summaries, dict)
+
+        return loss.detach() * inv_tokens_per_rank, summaries
+
     def training_step(
         self,
         model: nn.Module,
@@ -176,51 +308,83 @@ class RLTrainer(Trainer):
         pad_token_id = getattr(self.processing_class, "pad_token_id", None)
         assert pad_token_id is not None
 
+        is_peft = is_peft_model(self.model)
+
         for microbatch in local_microbatches:
-            input_ids = pad(
-                [torch.tensor(x, device=device) for x in microbatch.input_ids],
-                padding_value=pad_token_id,  # type: ignore :(
-                padding_side="right",
-            )
-            loss_mask = pad(
-                [torch.tensor(x, device=device) for x in microbatch.loss_mask],
-                padding_side="right",
-            )
-            inference_logprobs = pad(
-                [torch.tensor(x, device=device) for x in microbatch.sampling_logprobs],
-                padding_value=0,
-                padding_side="right",
-            )
-            advantages = pad(
-                [torch.tensor(x, device=device) for x in microbatch.advantages],
-                padding_value=0,
-                padding_side="right",
-            )
-            attn_mask = input_ids.ne(pad_token_id).int()
-            trainer_logprobs, entropies = self.get_logprobs(model, input_ids, attn_mask)
-            loss_mask = loss_mask[:, 1:]
-            inference_logprobs = inference_logprobs[:, 1:]
-            advantages = advantages[:, 1:]
-            mb_inputs = {
-                "loss_mask": loss_mask,
-                "inference_logprobs": inference_logprobs,
-                "trainer_logprobs": trainer_logprobs,
-                "entropies": entropies,
-                "advantages": advantages,
-            }
-            with self.compute_loss_context_manager():
-                loss, summaries = self.compute_loss(
-                    model,
-                    mb_inputs,
-                    num_items_in_batch=torch.tensor(self.batch_size, device=device),
-                    return_outputs=True,
+            # Check if multi-agent batch with lora_ids
+            has_lora_ids = hasattr(microbatch, "lora_ids") and microbatch.lora_ids
+            use_multi_lora = has_lora_ids and self.lora_ids and is_peft
+
+            if use_multi_lora:
+                # Group samples by lora_id and process each group
+                lora_groups = self._group_microbatch_by_lora(microbatch)
+
+                for lora_id, group_data in lora_groups.items():
+                    if not group_data["input_ids"]:
+                        continue
+
+                    # Switch to correct adapter
+                    if lora_id is not None:
+                        adapter_name = f"lora_{lora_id}"
+                        self.model.set_adapter(adapter_name)
+                        self.logger.debug(
+                            f"Switched to {adapter_name} for {len(group_data['input_ids'])} samples"
+                        )
+
+                    # Process this group
+                    loss, summaries = self._forward_backward_group(
+                        model, group_data, device, pad_token_id, inv_tokens_per_rank
+                    )
+                    total_loss = total_loss + loss
+                    update_stat_tracker(ir_tracker, summaries["importance_sampling"])
+                    update_stat_tracker(entropy_tracker, summaries["entropy"])
+                    update_stat_tracker(mismatch_kl_tracker, summaries["mismatch_kl"])
+            else:
+                # Standard single-adapter processing
+                input_ids = pad(
+                    [torch.tensor(x, device=device) for x in microbatch.input_ids],
+                    padding_value=pad_token_id,
+                    padding_side="right",
                 )
-            self.accelerator.backward(loss * inv_tokens_per_rank)
-            total_loss = total_loss + (loss.detach() * inv_tokens_per_rank)
-            assert isinstance(summaries, dict)
-            update_stat_tracker(ir_tracker, summaries["importance_sampling"])
-            update_stat_tracker(entropy_tracker, summaries["entropy"])
-            update_stat_tracker(mismatch_kl_tracker, summaries["mismatch_kl"])
+                loss_mask = pad(
+                    [torch.tensor(x, device=device) for x in microbatch.loss_mask],
+                    padding_side="right",
+                )
+                inference_logprobs = pad(
+                    [torch.tensor(x, device=device) for x in microbatch.sampling_logprobs],
+                    padding_value=0,
+                    padding_side="right",
+                )
+                advantages = pad(
+                    [torch.tensor(x, device=device) for x in microbatch.advantages],
+                    padding_value=0,
+                    padding_side="right",
+                )
+                attn_mask = input_ids.ne(pad_token_id).int()
+                trainer_logprobs, entropies = self.get_logprobs(model, input_ids, attn_mask)
+                loss_mask = loss_mask[:, 1:]
+                inference_logprobs = inference_logprobs[:, 1:]
+                advantages = advantages[:, 1:]
+                mb_inputs = {
+                    "loss_mask": loss_mask,
+                    "inference_logprobs": inference_logprobs,
+                    "trainer_logprobs": trainer_logprobs,
+                    "entropies": entropies,
+                    "advantages": advantages,
+                }
+                with self.compute_loss_context_manager():
+                    loss, summaries = self.compute_loss(
+                        model,
+                        mb_inputs,
+                        num_items_in_batch=torch.tensor(self.batch_size, device=device),
+                        return_outputs=True,
+                    )
+                self.accelerator.backward(loss * inv_tokens_per_rank)
+                total_loss = total_loss + (loss.detach() * inv_tokens_per_rank)
+                assert isinstance(summaries, dict)
+                update_stat_tracker(ir_tracker, summaries["importance_sampling"])
+                update_stat_tracker(entropy_tracker, summaries["entropy"])
+                update_stat_tracker(mismatch_kl_tracker, summaries["mismatch_kl"])
 
         ir_mean = finalize_stat_tracker(ir_tracker, self.accelerator)
         entropy_mean = finalize_stat_tracker(entropy_tracker, self.accelerator)
@@ -247,6 +411,20 @@ class RLTrainer(Trainer):
                 errors=batch.errors,
                 rewards_dict=batch.rewards_dict,
             )
+
+            # Log step summary for multi-agent
+            if batch.lora_id_counts:
+                lora_summary = ", ".join(
+                    f"{k}:{v}" for k, v in sorted(batch.lora_id_counts.items())
+                )
+                self.logger.info(
+                    f"Step {self.state.global_step}: "
+                    f"reward={metrics_to_log.get('reward', 0.0):.3f}, "
+                    f"samples=[{lora_summary}]"
+                )
+                for key, value in metrics_to_log.items():
+                    if key.startswith("reward/") and not key.endswith("/std"):
+                        self.logger.debug(f"  {key}={value:.3f}")
 
         self.maybe_clear_cache()
         return total_loss

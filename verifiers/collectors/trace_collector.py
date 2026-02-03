@@ -145,10 +145,8 @@ class TraceCollector:
             last_step = steps[-1]
             is_truncated = last_step.get("is_truncated", False)
 
-            # Sum rewards (treating None as 0)
-            total_reward = sum(
-                step.get("reward", 0.0) or 0.0 for step in steps
-            )
+            # Sum rewards from all steps
+            total_reward = sum(step["reward"] for step in steps)
 
             rollout = {
                 "id": str(uuid.uuid4()),

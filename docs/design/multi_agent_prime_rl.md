@@ -140,7 +140,7 @@ def _process_multi_agent_batch(self, batch_id, env_results, wall_clock_s) -> Bat
                 completion_ids.append(tokens["completion_ids"])
                 completion_mask.append(tokens["completion_mask"])
                 completion_logprobs.append(tokens["completion_logprobs"])
-                advantages.append(step.get("advantage", 0.0) or 0.0)
+                advantages.append(step["advantage"])
                 lora_ids.append(lora_id)
 
     # Build microbatches with lora_ids included
