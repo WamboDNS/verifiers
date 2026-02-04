@@ -52,6 +52,7 @@ class MultiAgentRubric(Rubric):
     def __init__(
         self,
         agent_rubrics: dict[str, Rubric] | None = None,
+        allow_missing: bool = False,
         **kwargs: Any,
     ):
         """
@@ -64,6 +65,7 @@ class MultiAgentRubric(Rubric):
         """
         super().__init__(**kwargs)
         self.agent_rubrics: dict[str, Rubric] = agent_rubrics or {}
+        self.allow_missing = allow_missing
 
     def add_agent_rubric(self, agent_id: str, rubric: Rubric) -> None:
         """
@@ -180,10 +182,11 @@ class MultiAgentRubric(Rubric):
             rubric = self.agent_rubrics.get(agent_id)
 
             if rubric is None:
-                # No rubric registered for this agent
-                agent_state["reward"] = 0.0
-                agent_state["metrics"] = {}
-                continue
+                if self.allow_missing:
+                    agent_state["reward"] = 0.0
+                    agent_state["metrics"] = {}
+                    continue
+                raise ValueError(f"No rubric registered for agent {agent_id!r}")
 
             # Create view and score
             agent_view = self._create_agent_view(state, agent_id)
@@ -196,6 +199,15 @@ class MultiAgentRubric(Rubric):
             # Store in agent state
             agent_state["reward"] = agent_reward
             agent_state["metrics"] = agent_metrics
+
+            # Update agent_rollouts if present
+            agent_rollouts = state.get("agent_rollouts", [])
+            for rollout in agent_rollouts:
+                meta = rollout.get("meta", {})
+                if meta.get("agent_id") == agent_id:
+                    rollout["total_reward"] = agent_reward
+                    meta["agent_reward"] = agent_reward
+                    rollout["meta"] = meta
 
             # Accumulate totals
             total_reward += agent_reward
@@ -237,6 +249,20 @@ class MultiAgentRubric(Rubric):
         rewards = [state.get("reward", 0.0) or 0.0 for state in states]
         avg_reward = sum(rewards) / len(rewards) if rewards else 0.0
 
+        # Compute per-agent means
+        agent_ids: set[str] = set()
+        for state in states:
+            agent_ids.update(state.get("agents", {}).keys())
+        agent_means: dict[str, float] = {}
+        for agent_id in agent_ids:
+            agent_rewards = [
+                s.get("agents", {}).get(agent_id, {}).get("reward", 0.0) or 0.0
+                for s in states
+            ]
+            agent_means[agent_id] = (
+                sum(agent_rewards) / len(agent_rewards) if agent_rewards else 0.0
+            )
+
         for state, reward in zip(states, rewards):
             state["advantage"] = reward - avg_reward
 
@@ -245,4 +271,4 @@ class MultiAgentRubric(Rubric):
                 for agent_id, agent_state in state["agents"].items():
                     agent_reward = agent_state.get("reward", 0.0) or 0.0
                     # Per-agent advantage relative to that agent's mean across group
-                    agent_state["advantage"] = agent_reward - avg_reward
+                    agent_state["advantage"] = agent_reward - agent_means.get(agent_id, 0.0)

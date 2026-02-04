@@ -119,6 +119,10 @@ class FullDialogContext(ContextStrategy):
             self._messages.extend(response)
         elif isinstance(response, dict):
             self._messages.append(response)
+        else:
+            raise TypeError(
+                f"response must be list or dict, got {type(response).__name__}"
+            )
 
     def on_after_step(self, obs: str, info: dict[str, Any]) -> None:
         """Add environment observation as user message if non-empty."""
@@ -176,6 +180,10 @@ class SlidingWindowContext(ContextStrategy):
             self._messages.extend(response)
         elif isinstance(response, dict):
             self._messages.append(response)
+        else:
+            raise TypeError(
+                f"response must be list or dict, got {type(response).__name__}"
+            )
         self._trim_to_window()
 
     def on_after_step(self, obs: str, info: dict[str, Any]) -> None:

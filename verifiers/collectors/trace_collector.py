@@ -103,6 +103,8 @@ class TraceCollector:
         """
         if not agent_id:
             raise ValueError("agent_id cannot be empty")
+        if agent_id not in self._agent_meta:
+            raise ValueError(f"agent_id {agent_id!r} is not registered")
         self._traces[agent_id].append(step)
 
     def extract_rollouts(self) -> list[dict[str, Any]]:
@@ -145,10 +147,12 @@ class TraceCollector:
             last_step = steps[-1]
             is_truncated = last_step.get("is_truncated", False)
 
-            # Sum rewards (treating None as 0)
-            total_reward = sum(
-                step.get("reward", 0.0) or 0.0 for step in steps
-            )
+            # Sum rewards; keep None if no step rewards are set
+            step_rewards = [step.get("reward") for step in steps]
+            if all(reward is None for reward in step_rewards):
+                total_reward = None
+            else:
+                total_reward = sum((reward or 0.0) for reward in step_rewards)
 
             rollout = {
                 "id": str(uuid.uuid4()),

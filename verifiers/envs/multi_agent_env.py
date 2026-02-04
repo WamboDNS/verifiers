@@ -131,6 +131,10 @@ class MultiAgentEnv(vf.MultiTurnEnv):
         """
         if not agents:
             raise ValueError("agents dict cannot be empty")
+        if turn_order not in ("sequential", "parallel"):
+            raise ValueError(
+                f"turn_order must be 'sequential' or 'parallel', got {turn_order!r}"
+            )
 
         super().__init__(max_turns=max_turns, **kwargs)
 
@@ -298,11 +302,33 @@ class MultiAgentEnv(vf.MultiTurnEnv):
         # Resolve client/model/sampling_args
         client = agent.client or state["client"]
         model = agent.model or state["model"]
-        sampling_args = {**state.get("sampling_args", {}), **agent.sampling_args}
+        state_sampling_args = state.get("sampling_args") or {}
+        if not isinstance(state_sampling_args, dict):
+            raise TypeError(
+                f"state['sampling_args'] must be a dict, got {type(state_sampling_args).__name__}"
+            )
+        if not isinstance(agent.sampling_args, dict):
+            raise TypeError(
+                f"agent.sampling_args must be a dict, got {type(agent.sampling_args).__name__}"
+            )
+        sampling_args = {**state_sampling_args, **agent.sampling_args}
 
         # Add LoRA request for multi-LoRA vLLM serving
         if agent.lora_id is not None:
-            extra_body = sampling_args.get("extra_body", {})
+            if not isinstance(agent.lora_id, int) or agent.lora_id < 0:
+                raise ValueError(
+                    f"lora_id must be a non-negative int, got {agent.lora_id!r}"
+                )
+            extra_body = sampling_args.get("extra_body")
+            if extra_body is None:
+                extra_body = {}
+            if not isinstance(extra_body, dict):
+                raise TypeError(
+                    f"sampling_args['extra_body'] must be a dict, got {type(extra_body).__name__}"
+                )
+            if "lora_request" in extra_body:
+                raise ValueError("sampling_args.extra_body already contains lora_request")
+            extra_body = dict(extra_body)
             extra_body["lora_request"] = {
                 "lora_name": f"lora_{agent.lora_id}",
                 "lora_int_id": agent.lora_id,
