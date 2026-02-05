@@ -52,7 +52,6 @@ class MultiAgentRubric(Rubric):
     def __init__(
         self,
         agent_rubrics: dict[str, Rubric] | None = None,
-        allow_missing: bool = False,
         **kwargs: Any,
     ):
         """
@@ -60,12 +59,12 @@ class MultiAgentRubric(Rubric):
 
         Args:
             agent_rubrics: Dict mapping agent_id to Rubric for per-agent scoring.
-                Agents not in this dict will receive reward=0.0.
+                Non-trainable agents without a rubric get reward=0.0.
+                Trainable agents without a rubric raise an error.
             **kwargs: Additional arguments passed to base Rubric.
         """
         super().__init__(**kwargs)
         self.agent_rubrics: dict[str, Rubric] = agent_rubrics or {}
-        self.allow_missing = allow_missing
 
     def add_agent_rubric(self, agent_id: str, rubric: Rubric) -> None:
         """
@@ -133,20 +132,13 @@ class MultiAgentRubric(Rubric):
             elif step_completion:
                 agent_completion.append(step_completion)
 
-        # Create view state
-        view = State()
-        view["input"] = state.get("input", {})
-        view["prompt"] = state.get("prompt")
+        # Start from a shallow copy of the full state so that env-specific
+        # fields (e.g. secret_leaked, turn_count) are visible to reward
+        # functions, then override agent-specific fields.
+        view = State(state)
         view["completion"] = agent_completion
         view["trajectory"] = agent_trajectory
-        view["answer"] = state.get("answer", "")
-        view["task"] = state.get("task", "")
-        view["info"] = state.get("info", {})
-        view["example_id"] = state.get("example_id")
         view["agent_id"] = agent_id
-        view["is_completed"] = state.get("is_completed", False)
-        view["is_truncated"] = state.get("is_truncated", False)
-        view["timing"] = state.get("timing", {})
         view["reward"] = None
         view["metrics"] = {}
 
@@ -182,11 +174,15 @@ class MultiAgentRubric(Rubric):
             rubric = self.agent_rubrics.get(agent_id)
 
             if rubric is None:
-                if self.allow_missing:
-                    agent_state["reward"] = 0.0
-                    agent_state["metrics"] = {}
-                    continue
-                raise ValueError(f"No rubric registered for agent {agent_id!r}")
+                agent_obj = state.get("_agent_instances", {}).get(agent_id)
+                if agent_obj is None or agent_obj.trainable:
+                    raise ValueError(f"No rubric registered for trainable agent {agent_id!r}")
+                agent_state["reward"] = 0.0
+                agent_state["metrics"] = {}
+                for rollout in state.get("agent_rollouts", []):
+                    if rollout.get("meta", {}).get("agent_id") == agent_id:
+                        rollout["total_reward"] = 0.0
+                continue
 
             # Create view and score
             agent_view = self._create_agent_view(state, agent_id)
