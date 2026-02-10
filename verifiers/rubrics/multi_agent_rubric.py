@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from verifiers.rubrics.rubric import Rubric
@@ -161,12 +162,14 @@ class MultiAgentRubric(Rubric):
         Args:
             state: The rollout state to score.
         """
-        # Check if this is a multi-agent state
         if "agents" not in state:
-            # Fall back to base rubric scoring
-            await super().score_rollout(state)
-            return
+            raise ValueError(
+                "MultiAgentRubric.score_rollout() requires a multi-agent state "
+                "(state must have 'agents' key). Use a standard Rubric for "
+                "single-agent environments."
+            )
 
+        start_time = time.time()
         total_reward = 0.0
         all_metrics: dict[str, float] = {}
 
@@ -217,6 +220,13 @@ class MultiAgentRubric(Rubric):
         state["reward"] = total_reward
         state["metrics"] = all_metrics
 
+        # Record scoring timing (matches base Rubric.score_rollout behavior)
+        end_time = time.time()
+        timing = state.get("timing")
+        if timing is not None:
+            timing["scoring_ms"] = (end_time - start_time) * 1000
+            timing["total_ms"] += timing["scoring_ms"]
+
     async def score_group(self, states: list[State]) -> None:
         """
         Score a group of rollouts.
@@ -228,15 +238,7 @@ class MultiAgentRubric(Rubric):
         Args:
             states: List of rollout states to score.
         """
-        # Check if any state is multi-agent
-        has_multi_agent = any("agents" in state for state in states)
-
-        if not has_multi_agent:
-            # All single-agent: use base implementation
-            await super().score_group(states)
-            return
-
-        # Multi-agent: score each state independently
+        # Score each state independently
         # Group scoring across agents is complex and not commonly needed
         for state in states:
             await self.score_rollout(state)
@@ -262,9 +264,20 @@ class MultiAgentRubric(Rubric):
         for state, reward in zip(states, rewards):
             state["advantage"] = reward - avg_reward
 
-            # Also set per-agent advantages if multi-agent
-            if "agents" in state:
-                for agent_id, agent_state in state["agents"].items():
-                    agent_reward = agent_state.get("reward", 0.0) or 0.0
-                    # Per-agent advantage relative to that agent's mean across group
-                    agent_state["advantage"] = agent_reward - agent_means.get(agent_id, 0.0)
+            # Propagate rewards/advantages to shared trajectory steps
+            for t in state.get("trajectory", []):
+                if t["advantage"] is None:
+                    t["advantage"] = state["advantage"]
+                if t["reward"] is None:
+                    t["reward"] = state["reward"]
+
+            # Set per-agent advantages and propagate to per-agent trajectory steps
+            for agent_id, agent_state in state.get("agents", {}).items():
+                agent_reward = agent_state.get("reward", 0.0) or 0.0
+                agent_state["advantage"] = agent_reward - agent_means.get(agent_id, 0.0)
+
+                for t in agent_state.get("trajectory", []):
+                    if t["advantage"] is None:
+                        t["advantage"] = agent_state["advantage"]
+                    if t["reward"] is None:
+                        t["reward"] = agent_state["reward"]

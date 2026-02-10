@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-import uuid
+from collections import defaultdict
 from copy import deepcopy
 from typing import Any, Literal
 
@@ -18,12 +18,10 @@ from verifiers.types import (
     Messages,
     ModelResponse,
     RolloutInput,
-    RolloutTiming,
     SamplingArgs,
     State,
     TrajectoryStep,
 )
-from verifiers.utils.message_utils import concat_messages
 from verifiers.utils.response_utils import (
     parse_is_truncated,
     parse_response_messages,
@@ -162,11 +160,6 @@ class MultiAgentEnv(vf.MultiTurnEnv):
         # Add monitor rubric
         self.add_rubric(MultiAgentMonitorRubric())
 
-        self.logger.debug(
-            f"Initialized MultiAgentEnv with {len(self.agents)} agents, "
-            f"turn_order={turn_order}, max_turns={max_turns}"
-        )
-
     # -------------------------------------------------------------------------
     # Agent access helpers
     # -------------------------------------------------------------------------
@@ -184,18 +177,18 @@ class MultiAgentEnv(vf.MultiTurnEnv):
         """
         Group trainable agents by their LoRA adapter ID.
 
+        Available at init time (reads from self.agents, not the per-rollout
+        TraceCollector which has a similar method for post-rollout use).
+
         Returns:
             Dict mapping lora_id to list of agent_ids.
             Agents with lora_id=None are grouped under None.
         """
-        groups: dict[int | None, list[str]] = {}
+        groups: dict[int | None, list[str]] = defaultdict(list)
         for aid, agent in self.agents.items():
             if agent.trainable:
-                lora = agent.lora_id
-                if lora not in groups:
-                    groups[lora] = []
-                groups[lora].append(aid)
-        return groups
+                groups[agent.lora_id].append(aid)
+        return dict(groups)
 
     # -------------------------------------------------------------------------
     # Hooks for subclasses to override
@@ -297,13 +290,7 @@ class MultiAgentEnv(vf.MultiTurnEnv):
         to state defaults. If the agent has a lora_id, includes it in the
         request for vLLM multi-LoRA routing.
         """
-        example_id = state.get("example_id")
         prompt = agent.get_prompt()
-        num_prompt_msgs = len(prompt) if isinstance(prompt, list) else 1
-        logger.debug(
-            f"[_get_agent_response] example_id={example_id} agent={agent.agent_id} "
-            f"prompt_messages={num_prompt_msgs} lora_id={agent.lora_id}"
-        )
 
         # Resolve client/model/sampling_args
         client = agent.client or state["client"]
@@ -344,30 +331,19 @@ class MultiAgentEnv(vf.MultiTurnEnv):
         # Use per-agent trajectory for interleaved rollouts so that
         # get_prompt_ids builds token prompts from this agent's own
         # conversation context rather than the shared cross-agent trajectory.
-        original_trajectory = state["trajectory"]
-        agent_state = state.get("agents", {}).get(agent.agent_id, {})
-        per_agent_traj = agent_state.get("trajectory", [])
-        logger.debug(
-            f"[_get_agent_response] example_id={example_id} agent={agent.agent_id} "
-            f"swapping trajectory: shared_len={len(original_trajectory)} -> agent_len={len(per_agent_traj)} "
-            f"interleaved={self.interleaved_rollouts}"
-        )
-        state["trajectory"] = per_agent_traj
-        t_start = time.time()
-        try:
-            response = await self.get_model_response(
-                state=state,
-                prompt=prompt,
-                client=client,
-                model=model,
-                sampling_args=sampling_args,
-            )
-        finally:
-            state["trajectory"] = original_trajectory
-        t_elapsed = time.time() - t_start
-        logger.info(
-            f"[_get_agent_response] example_id={example_id} agent={agent.agent_id} "
-            f"model response received in {t_elapsed:.2f}s"
+        # We create a shallow state view rather than mutating state["trajectory"]
+        # in-place, because parallel mode runs multiple agents concurrently via
+        # asyncio.gather and in-place mutation is not safe across await points.
+        agent_state_data = state.get("agents", {}).get(agent.agent_id, {})
+        per_agent_traj = agent_state_data.get("trajectory", [])
+        state_view = State(state)
+        state_view["trajectory"] = per_agent_traj
+        response = await self.get_model_response(
+            state=state_view,
+            prompt=prompt,
+            client=client,
+            model=model,
+            sampling_args=sampling_args,
         )
 
         completion = await parse_response_messages(response, self.message_type)
@@ -383,13 +359,6 @@ class MultiAgentEnv(vf.MultiTurnEnv):
 
         Returns the trajectory step for this turn.
         """
-        example_id = state.get("example_id")
-        current_turn = state.get("current_turn", 0)
-        logger.info(
-            f"[_agent_turn] START example_id={example_id} agent={agent_id} "
-            f"turn={current_turn}"
-        )
-
         agent = state["_agent_instances"][agent_id]
         prompt = agent.get_prompt()
 
@@ -406,18 +375,6 @@ class MultiAgentEnv(vf.MultiTurnEnv):
         is_truncated = await parse_is_truncated(response, self.message_type)
         if tokens is not None and tokens.get("is_truncated"):
             is_truncated = True
-
-        has_tokens = tokens is not None
-        completion_preview = ""
-        if completion and isinstance(completion, list) and len(completion) > 0:
-            content = completion[-1].get("content", "")
-            completion_preview = content[:100] + ("..." if len(content) > 100 else "")
-
-        logger.info(
-            f"[_agent_turn] DONE example_id={example_id} agent={agent_id} "
-            f"turn={current_turn} has_tokens={has_tokens} is_truncated={is_truncated} "
-            f"completion_preview='{completion_preview}'"
-        )
 
         # Create trajectory step
         step = TrajectoryStep(
@@ -447,8 +404,6 @@ class MultiAgentEnv(vf.MultiTurnEnv):
         - TraceCollector for trajectory collection
         - Turn counter
         """
-        example_id = state.get("example_id")
-        logger.info(f"[setup_state] example_id={example_id} initializing multi-agent state")
         state = await super().setup_state(state)
 
         # Deep-copy agents so each rollout has independent conversation contexts.
@@ -466,10 +421,6 @@ class MultiAgentEnv(vf.MultiTurnEnv):
                 "metrics": {},
                 "trajectory": [],
             }
-            logger.debug(
-                f"[setup_state] example_id={example_id} registered agent={agent_id} "
-                f"trainable={agent.trainable} lora_id={agent.lora_id}"
-            )
 
         # Create trace collector with global metadata
         state["collector"] = TraceCollector(
@@ -495,9 +446,6 @@ class MultiAgentEnv(vf.MultiTurnEnv):
             obs = await self.get_initial_observation(agent_id, state)
             if obs is not None:
                 agent.on_env_reset(obs, state.get("info", {}))
-                logger.debug(f"[setup_state] example_id={example_id} agent={agent_id} got initial observation")
-
-        logger.info(f"[setup_state] example_id={example_id} setup complete, {len(rollout_agents)} agents ready")
         return state
 
     async def env_response(
@@ -564,10 +512,6 @@ class MultiAgentEnv(vf.MultiTurnEnv):
                 try:
                     # Get agents that act this turn
                     active_agents = await self.get_active_agents(state)
-                    logger.debug(
-                        f"[rollout] example_id={example_id} turn={turn_count} "
-                        f"active_agents={active_agents} shared_traj_len={len(state['trajectory'])}"
-                    )
 
                     if self.turn_order == "parallel":
                         # All active agents act simultaneously
@@ -600,12 +544,6 @@ class MultiAgentEnv(vf.MultiTurnEnv):
                             collector.add(aid, step)
                             state["trajectory"].append(step)
                             state["agents"][aid]["trajectory"].append(step)
-                            logger.debug(
-                                f"[rollout] example_id={example_id} turn={turn_count} "
-                                f"agent={aid} step recorded, "
-                                f"shared_traj_len={len(state['trajectory'])} "
-                                f"agent_traj_len={len(state['agents'][aid]['trajectory'])}"
-                            )
 
                             # Notify other agents
                             rollout_agents = state["_agent_instances"]
@@ -616,10 +554,6 @@ class MultiAgentEnv(vf.MultiTurnEnv):
                                     )
                                     if obs is not None:
                                         rollout_agents[other_aid].on_after_step(obs, {})
-                                        logger.debug(
-                                            f"[rollout] example_id={example_id} "
-                                            f"agent={other_aid} got observation from {aid}"
-                                        )
 
                     state["current_turn"] += 1
                     turn_count += 1
@@ -641,21 +575,11 @@ class MultiAgentEnv(vf.MultiTurnEnv):
             # Per-agent rewards are set later by MultiAgentRubric.score_rollout()
             # which runs after rollout() returns (in run_group/run_rollout).
             state["agent_rollouts"] = collector.extract_rollouts()
-            num_agent_rollouts = len(state["agent_rollouts"])
             t_elapsed = time.time() - t_rollout_start
             logger.info(
                 f"[rollout] DONE example_id={example_id} turns={turn_count} "
-                f"reward={state.get('reward')} error={state.get('error')} "
-                f"agent_rollouts={num_agent_rollouts} elapsed={t_elapsed:.2f}s"
+                f"agents={len(state['agent_rollouts'])} elapsed={t_elapsed:.2f}s"
             )
-            for ar in state["agent_rollouts"]:
-                ar_meta = ar.get("meta", {})
-                logger.debug(
-                    f"[rollout] example_id={example_id} agent_rollout: "
-                    f"agent={ar_meta.get('agent_id')} trainable={ar_meta.get('trainable')} "
-                    f"lora_id={ar_meta.get('lora_id')} steps={len(ar.get('steps', []))} "
-                    f"total_reward={ar.get('total_reward')}"
-                )
 
             return state
 

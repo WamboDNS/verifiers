@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -209,6 +210,24 @@ class Agent:
             trainable=config.trainable,
             lora_id=config.lora_id,
             context=context,
+        )
+
+    def __deepcopy__(self, memo: dict) -> "Agent":
+        """Deep-copy the agent but preserve client by reference.
+
+        AsyncOpenAI instances hold connection pools and internal state that
+        do not survive deep copy. The client is intentionally shared.
+        """
+        return Agent(
+            agent_id=self.agent_id,
+            name=self.name,
+            system_prompt=self.system_prompt,
+            sampling_args=copy.deepcopy(self.sampling_args, memo),
+            client=self.client,  # shared, not deep-copied
+            model=self.model,
+            trainable=self.trainable,
+            lora_id=self.lora_id,
+            context=copy.deepcopy(self._ctx, memo),
         )
 
     def __repr__(self) -> str:

@@ -145,6 +145,46 @@ To run an evaluation directly from the Environments Hub, do:
 prime eval run primeintellect/math-python
 ```
 
+## Multi-Agent Environments
+
+`MultiAgentEnv` extends the multi-turn environment to support multiple agents in a shared environment. Each agent has its own conversation context, system prompt, and optional per-agent model/client overrides. Agents can be marked as `trainable=False` to act as frozen opponents or judges.
+
+For training with RL, each agent is assigned a `lora_id` that maps to an independent LoRA adapter. Agents sharing a `lora_id` share weights; agents with different IDs are trained independently. The environment handles routing inference requests to the correct adapter via vLLM's multi-LoRA serving.
+
+```python
+import verifiers as vf
+from verifiers import AgentConfig, MultiAgentEnv, MultiAgentRubric
+
+class DebateEnv(MultiAgentEnv):
+    def __init__(self):
+        agents = {
+            "proponent": AgentConfig(
+                agent_id="proponent",
+                system_prompt="Argue in favor of the given position.",
+                lora_id=0,
+            ),
+            "opponent": AgentConfig(
+                agent_id="opponent",
+                system_prompt="Argue against the given position.",
+                lora_id=1,
+            ),
+        }
+        super().__init__(agents=agents, turn_order="sequential", max_turns=6, ...)
+
+    async def get_initial_observation(self, agent_id, state):
+        return f"Topic: {state['task']}"
+
+    async def get_agent_observation(self, agent_id, response, state):
+        # Each agent sees the other's last response
+        return response[-1]["content"] if response else None
+```
+
+Key concepts:
+- **Turn order**: `"parallel"` (all agents act each round) or `"sequential"` (round-robin)
+- **Observations**: Override `get_agent_observation` to control what agents see of each other's actions. By default agents are independent.
+- **Scoring**: `MultiAgentRubric` assigns per-agent rubrics so each agent can have its own reward function. Per-agent advantages are computed relative to each agent's own mean across a group.
+- **Context strategies**: `FullDialogContext` (default) keeps the full history; `SlidingWindowContext` keeps a rolling window.
+
 ## Documentation
 
 **[Environments](environments.md)** — Create datasets, rubrics, and custom multi-turn interaction protocols.
