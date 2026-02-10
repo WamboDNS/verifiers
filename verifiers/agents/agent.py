@@ -58,33 +58,6 @@ class Agent:
     The Agent does NOT make API calls directly - that is handled by the
     environment. The Agent's responsibility is to manage its conversation
     context and provide prompts for the environment to use.
-
-    Example:
-        ```python
-        # Create an agent with full dialog context
-        agent = Agent(
-            agent_id="player1",
-            name="Player One",
-            system_prompt="You are playing a game.",
-            trainable=True,
-            lora_id=0,
-        )
-
-        # Reset for a new episode
-        agent.reset()
-
-        # Get initial observation from environment
-        agent.on_env_reset(obs="Game started.", info={})
-
-        # Get prompt for model inference
-        prompt = agent.get_prompt()  # Returns messages for API call
-
-        # Record model response
-        agent.record_response([{"role": "assistant", "content": "I'll start."}])
-
-        # Record next observation
-        agent.on_after_step(obs="Your turn.", info={})
-        ```
     """
 
     def __init__(

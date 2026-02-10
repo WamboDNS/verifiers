@@ -15,39 +15,8 @@ class MultiAgentRubric(Rubric):
 
     MultiAgentRubric allows assigning different rubrics to different agents,
     enabling agent-specific reward functions and metrics. Each agent is
-    scored using its own rubric, and rewards/metrics are stored per-agent.
-
-    Example:
-        ```python
-        # Create rubrics for different agents
-        player_rubric = vf.Rubric(funcs=[win_reward])
-        referee_rubric = vf.Rubric(funcs=[fairness_reward])
-
-        # Create multi-agent rubric with per-agent scoring
-        multi_rubric = MultiAgentRubric(
-            agent_rubrics={
-                "player1": player_rubric,
-                "player2": player_rubric,  # Can share rubrics
-                "referee": referee_rubric,
-            }
-        )
-
-        # Use in environment
-        env = MyMultiAgentEnv(
-            agents=agents,
-            rubric=multi_rubric,
-        )
-        ```
-
-    Scoring behavior:
-    - If state has "agents" dict (multi-agent state), scores each agent
-      with its registered rubric
-    - If no agent rubric is registered, that agent gets reward=0.0
-    - If state doesn't have "agents" dict, falls back to base Rubric scoring
-
-    Per-agent rewards and metrics are stored in state["agents"][agent_id]:
-        state["agents"]["player1"]["reward"] = 1.0
-        state["agents"]["player1"]["metrics"] = {"win_reward": 1.0}
+    scored using its own rubric, and rewards/metrics are stored per-agent
+    in state["agents"][agent_id]["reward"] and state["agents"][agent_id]["metrics"].
     """
 
     def __init__(

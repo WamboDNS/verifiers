@@ -17,33 +17,6 @@ class TraceCollector:
     enabling per-agent rollout extraction for training. Each agent's steps
     are stored separately, and metadata (trainable, lora_id, etc.) is
     preserved for use during training.
-
-    Example:
-        ```python
-        collector = TraceCollector(episode_id="ep_001")
-
-        # Register agents with their training metadata
-        collector.register_agent(
-            agent_id="player1",
-            name="Player One",
-            trainable=True,
-            lora_id=0,
-        )
-        collector.register_agent(
-            agent_id="player2",
-            name="Player Two",
-            trainable=True,
-            lora_id=1,
-        )
-
-        # During rollout, add steps for each agent
-        collector.add("player1", step1)
-        collector.add("player2", step2)
-
-        # Extract per-agent rollouts for training
-        rollouts = collector.extract_rollouts()
-        # Returns list of dicts, one per agent with non-empty traces
-        ```
     """
 
     def __init__(self, **global_meta: Any):

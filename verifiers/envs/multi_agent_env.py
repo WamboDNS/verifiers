@@ -66,44 +66,6 @@ class MultiAgentEnv(vf.MultiTurnEnv):
 
     By default, agents run independently (no interaction). Override
     `get_agent_observation` to implement agent-to-agent communication.
-
-    Example:
-        ```python
-        class TicTacToeEnv(MultiAgentEnv):
-            def __init__(self):
-                agents = {
-                    "player_x": AgentConfig(
-                        agent_id="player_x",
-                        system_prompt="You are playing X in tic-tac-toe.",
-                        trainable=True,
-                        lora_id=0,
-                    ),
-                    "player_o": AgentConfig(
-                        agent_id="player_o",
-                        system_prompt="You are playing O in tic-tac-toe.",
-                        trainable=True,
-                        lora_id=1,
-                    ),
-                }
-                super().__init__(
-                    agents=agents,
-                    turn_order="sequential",
-                    max_turns=9,
-                    dataset=my_dataset,
-                )
-
-            async def get_initial_observation(
-                self, agent_id: str, state: State
-            ) -> str | None:
-                return f"Game started. You are {agent_id.split('_')[1].upper()}."
-
-            async def get_agent_observation(
-                self, agent_id: str, response: Messages, state: State
-            ) -> str | None:
-                # Show opponent's move to each agent
-                board = state.get("board", "")
-                return f"Current board:\\n{board}"
-        ```
     """
 
     def __init__(
